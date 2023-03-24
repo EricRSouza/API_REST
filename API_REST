@@ -1,0 +1,242 @@
+from airflow import DAG
+from airflow.operators.python_operator import PythonOperator
+from airflow.hooks.postgres_hook import PostgresHook
+import pandas as pd
+#import datetime
+from datetime import datetime, timedelta, date
+import time
+import json
+import requests
+import os
+
+
+default_args = {
+    'owner': 'airflow',
+   'depends_on_past': False,
+   'start_date': datetime(2020, 10, 21),
+   'max_active_runs': 1,
+   'email': ['r.farias@senff.com.br'],
+   'email_on_failure': False,
+   'email_on_retry': False,
+   'retries': 0,
+   'retry_delay': timedelta(minutes=50),
+}
+
+dag = DAG(dag_id='api_privacytools',catchup=False, default_args=default_args,
+         schedule_interval="0 7 * * *"  )  
+
+
+# Função para pegar o arquivo mais novo da pasta
+def get_newest_file_date(folder):
+   #print('---->',folder)
+   # Cria uma lista apenas com arquivos da pasta
+   files = [os.path.join(folder, file) for file in os.listdir(folder) if os.path.isfile(os.path.join(folder, file))]
+
+   # Ordena a lista pelo horário da última modificação do arquivo
+   order_files = sorted(files, key=lambda x: os.path.basename(x), reverse=True)
+
+   # busca o caminho do arquivo mais recente
+   newest_file = order_files[0]
+
+   # Extrai o nome do arquivo
+   file_name = os.path.basename(newest_file)
+
+   # Converte a data do nome do arquivo para datetime
+   file_name = file_name.replace("\\","")
+   #print('---->',file_name[:10])
+   file_date = datetime.strptime(file_name[:10], '%Y-%m-%d').date()
+
+   return file_date
+
+def get_privacy (**kwargs):
+   execution_date = kwargs['execution_date'].strftime('%Y-%m-%d')
+   #print('----> 01')
+   # Dados necessários para a requisição na API
+   token_url = "https://dpo.privacytools.com.br/external_api_v2/oauth/token"
+   client_id = "abc123"
+   client_secret = "abc321"
+   payload = "username=usuario123&password=senha123&grant_type=password"
+   headers_token = {
+       'Content-Type': 'Content-Type123'
+   }
+   
+   # Fazendo solicitação do token
+   response = requests.request("POST", token_url, headers=headers_token, data=payload, auth=(client_id, client_secret)).json()    
+
+   # Armazenando o Authorization Token
+   access_token = response.get("access_token")
+   token_type = response.get("token_type")
+   # refresh_token = content.get("refresh_token")
+   # expires_in = content.get("expires_in")
+   # scope = content.get("scope")
+   # print(f'{token_type} {access_token}')   
+     
+   # Parametros para a requisição dos dados na API
+   # endpoint dos novos clientes
+   endpoint_new = "https://dpo.privacytools.com.br/external_api_v2/consent/find/"
+   # endpoint dos clientes que alteraram os status
+   endpoint_change = "https://dpo.privacytools.com.br/external_api_v2/consent/find/fixed"
+   # Authorization Token
+   headers_data = {
+       'accept': '*/*',
+       'Authorization': f'{token_type} {access_token}'
+   }    
+
+   # Selecionando até qual data irá rodar o código
+   today = datetime.today().date()
+   yesterday = today - timedelta(days=1)    
+
+   # Caminho do Arquivos
+   folder = fr"/dados/"    
+
+   # Buscar data do ultimo arquivo
+   file_date = get_newest_file_date(folder) 
+
+   # Voltar a data em 7 dias (Rodar sempre os ultimos 7 dias)
+   file_date = file_date - datetime.timedelta(days=7)   
+
+   # Looping para gerar um arquivo por dia
+   while yesterday > file_date:    
+
+       # parametros para requisição
+       page_new = 0  # pagina inicial sempre 0
+       page_changed = 0  # pagina inicial sempre 0
+       limit = 200  # limite max de registros 200 por pagina
+       df_aceites = []
+       new_results = True    
+
+       # Calcula as datas de startdate e enddate da requisição
+       startdate_date = file_date - timedelta(days=-1)
+       enddate_date = file_date - timedelta(days=-2)   
+
+       # Formata as datas para o formato da url
+       startdate_formatted = startdate_date.strftime("%d-%m-%Y 00:00").replace(" ", "%20").replace(":", "%3A")
+       enddate_formatted = enddate_date.strftime("%d-%m-%Y 00:00").replace(" ", "%20").replace(":", "%3A")  
+
+       # Verificar quantas paginas possui a requisição dos novos clientes
+       num_pages_url = (f'{endpoint_new}?endDate={enddate_formatted}&limit={limit}&offset={page_new}&startDate={startdate_formatted}')
+       total_pages = requests.get(num_pages_url, headers=headers_data).json().get("totalPages", [])
+
+       # Fazendo a paginação da API dos novos clientes
+       while page_new <= int(total_pages):
+
+           # Criando url personalizada para requisição
+           data_url = (f'{endpoint_new}?endDate={enddate_formatted}&limit={limit}&offset={page_new}&startDate={startdate_formatted}')    
+
+           # Requisitando e armazenando dados
+           data = requests.get(data_url, headers=headers_data).json()
+           new_results = data.get("items", [])
+           df_aceites.extend(new_results)  
+
+           # Proxima pagina
+           page_new += 1 
+
+       # Printando data da coleta + endpoint utilizado
+       #print(f'Dados Novos do dia {startdate_date} paginas {page_new}   {endpoint_change}?endDate={enddate_formatted}&limit={limit}&offset={page_new}&startDate={startdate_formatted}')    
+       
+       # Verificar quantas paginas possui a requisição dos clientes que houveram alteração
+       num_pages_url = (f'{endpoint_change}?finalDate={enddate_formatted}&limit={limit}&offset={page_changed}&startDate={startdate_formatted}')
+       total_pages = requests.get(num_pages_url, headers=headers_data).json().get("totalPages", [])
+
+       # Fazendo a paginação da API dos clientes que houveram alteração
+       while page_changed <= int(total_pages):
+
+           # Criando url personalizada para requisição
+           data_url = (f'{endpoint_change}?finalDate={enddate_formatted}&limit={limit}&offset={page_changed}&startDate={startdate_formatted}')    
+
+           # Requisitando e armazenando dados
+           data = requests.get(data_url, headers=headers_data).json()
+           new_results = data.get("items", [])
+           df_aceites.extend(new_results)
+
+           # Proxima pagina
+           page_changed += 1    
+
+       # Printando data da coleta + endpoint utilizado
+       #print(f'Dados Modificados do dia {startdate_date} paginas {page_changed}   {endpoint_change}?finalDate={enddate_formatted}&limit={limit}&offset={page_new}&startDate={startdate_formatted}')
+       
+       # Filtrando e tratando apenas os dados desejados
+       df = pd.DataFrame(
+        df_aceites,
+        columns=[
+            'identityHash',
+            'hashConsent',
+            'origin',
+            'status',
+            'creationDate',
+            'retentionDate',
+            'authorizationDate',
+            'revokeDate',
+            'changeDate',
+            'group',
+            'template',
+            'person'
+        ]
+       )    
+
+       # alterando o tipo dos dados para string
+       df = df.astype({
+        'identityHash': str,
+        'hashConsent': str,
+        'origin': str,
+        'status': str,
+        'creationDate': str,
+        'retentionDate': str,
+        'authorizationDate': str,
+        'revokeDate': str,
+        'changeDate': str,
+        'group': str,
+        'template': str,
+        'person': str
+       })  
+
+       # tratando os erros None e nan
+       df['creationDate'] = df['creationDate'].replace("None",0).replace("nan",0).astype(float)
+       df['retentionDate'] = df['retentionDate'].replace("None",0).replace("nan",0).astype(float)
+       df['authorizationDate'] = df['authorizationDate'].replace("None",0).replace("nan",0).astype(float)
+       df['revokeDate'] = df['revokeDate'].replace("None",0).replace("nan",0).astype(float)
+       df['changeDate'] = df['changeDate'].replace("None",0).replace("nan",0).astype(float)
+
+       # convertendo para data %d/%m/%Y
+       df['creationDate'] = df['creationDate'].apply(lambda x: datetime.fromtimestamp(x/1000.0).strftime('%Y-%m-%dT%H:%M:%S'))
+       df['retentionDate'] = df['retentionDate'].apply(lambda x: datetime.fromtimestamp(x/1000.0).strftime('%Y-%m-%dT%H:%M:%S'))
+       df['authorizationDate'] = df['authorizationDate'].apply(lambda x: datetime.fromtimestamp(x/1000.0).strftime('%Y-%m-%dT%H:%M:%S'))
+       df['revokeDate'] = df['revokeDate'].apply(lambda x: datetime.fromtimestamp(x/1000.0).strftime('%Y-%m-%dT%H:%M:%S'))
+       df['changeDate'] = df['changeDate'].apply(lambda x: datetime.fromtimestamp(x/1000.0).strftime('%Y-%m-%dT%H:%M:%S'))
+
+       # Tratando os Zeros
+       df['creationDate'] = df['creationDate'].replace("1969-12-31T21:00:00",None)
+       df['retentionDate'] = df['retentionDate'].replace("1969-12-31T21:00:00",None)
+       df['authorizationDate'] = df['authorizationDate'].replace("1969-12-31T21:00:00",None)
+       df['revokeDate'] = df['revokeDate'].replace("1969-12-31T21:00:00",None)
+       df['changeDate'] = df['changeDate'].replace("1969-12-31T21:00:00",None)
+
+       # convertendo tudo para string para o Dremio
+       df = df.astype({
+       'identityHash': str,
+       'hashConsent': str,
+       'origin': str,
+       'status': str,
+       'creationDate': str,
+       'retentionDate': str,
+       'authorizationDate': str,
+       'revokeDate': str,
+       'changeDate': str,
+       'group': str,
+       'template': str,
+       'person': str
+       })   
+
+       # Salvando dados em parquet e armazenando os dados em um arquivo gzip
+       df.to_parquet(fr'{folder}/{startdate_date}_consentimento.gzip',compression='gzip')
+       file_date = file_date - timedelta(days=-1)
+       #print(f'Dados do dia {startdate_date} finalizados')
+
+task_get_privacy = PythonOperator(
+   task_id='get_privacy',
+   provide_context=True,
+   python_callable=get_privacy,        
+   dag=dag
+   )
+
+task_get_privacy
