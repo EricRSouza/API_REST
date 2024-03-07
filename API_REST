@@ -22,7 +22,7 @@ default_args = {
 }
 
 dag = DAG(dag_id='api_privacytools',catchup=False, default_args=default_args,
-         schedule_interval="0 7 * * *"  )  
+         schedule_interval="0 7 * * *"  )
 
 
 # Função para pegar o arquivo mais novo da pasta
@@ -117,9 +117,9 @@ def get_privacy (**kwargs):
        'Authorization': f'{token_type} {access_token}'
    }
    # Selecionando até qual data iram rodar o código
-   today = datetime.datetime.today().date()  
+   today = datetime.datetime.today().date()
    # Buscar data do ultimo arquivo
-   file_date = get_date(folder)  
+   file_date = get_date(folder)
    # Looping para gerar um arquivo por dia
    while today > file_date:
        # Calcula as datas de startdate e enddate da requisição
@@ -143,7 +143,7 @@ def get_privacy (**kwargs):
 task_get_privacy = PythonOperator(
    task_id='get_privacy',
    provide_context=True,
-   python_callable=get_privacy,        
+   python_callable=get_privacy,
    dag=dag
    )
 
